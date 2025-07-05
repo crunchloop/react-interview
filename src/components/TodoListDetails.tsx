@@ -28,8 +28,12 @@ import { io } from "socket.io-client";
 export default function TodoListDetails() {
   const { listid } = useParams<{ listid: string }>();
   const [listDetails, setListDetails] = useState<TodoList | null>(null);
+  const [originalState, setOriginalState] = useState<TodoList | null>(null);
   const [newItemContent, setNewItemContent] = useState("");
   const [editingItemId, setEditingItemId] = useState<number | null>(null);
+  const [modifiedItems, setModifiedItems] = useState<Record<number, boolean>>(
+    {}
+  );
   const [editedContent, setEditedContent] = useState("");
   const [isUpdating, setIsUpdating] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -42,6 +46,7 @@ export default function TodoListDetails() {
       if (listid) {
         const details = await fetchTodoListDetails(parseInt(listid));
         setListDetails(details);
+        setOriginalState(details);
       } else {
         console.error("List ID is not defined");
       }
@@ -70,12 +75,31 @@ export default function TodoListDetails() {
   };
 
   const handleToggleDone = (taskId: number) => {
-    if (!listDetails) return;
-    const updatedItems = listDetails.items
-      ? listDetails.items.map((item) =>
-          item.id === taskId ? { ...item, done: !item.done } : item
-        )
-      : [];
+    if (!listDetails || !originalState) return;
+
+    const updatedItems = listDetails.items.map((item) => {
+      if (item.id === taskId) {
+        const newCompleted = !item.completed;
+        const originalCompleted = originalState.items.find(
+          (i) => i.id === taskId
+        )?.completed;
+
+        setModifiedItems((prev) => {
+          const newState = { ...prev };
+          if (newCompleted === originalCompleted) {
+            delete newState[taskId];
+          } else {
+            newState[taskId] = newCompleted;
+          }
+
+          return newState;
+        });
+
+        return { ...item, completed: newCompleted };
+      }
+      return item;
+    });
+
     setListDetails({ ...listDetails, items: updatedItems });
   };
 
@@ -88,6 +112,28 @@ export default function TodoListDetails() {
     setShouldConnect(true);
     await bulkUpdateTodoItems(parseInt(listid!));
   };
+
+  const handleSaveCompletedChange = async (taskId: number) => {
+    const newCompleted = modifiedItems[taskId];
+    const item = listDetails?.items.find((i) => i.id === taskId);
+
+    if (item && newCompleted !== undefined) {
+      await updateTodoItem(
+        parseInt(listid!),
+        taskId,
+        newCompleted,
+        item.content
+      );
+
+      await fetchListDetails();
+      setModifiedItems((prev) => {
+        const newState = { ...prev };
+        delete newState[taskId];
+        return newState;
+      });
+    }
+  };
+
   useEffect(() => {
     fetchListDetails();
   }, [listid]);
@@ -95,6 +141,7 @@ export default function TodoListDetails() {
   useEffect(() => {
     if (!shouldConnect) return;
 
+    setIsUpdating(true);
     const socket = io("http://localhost:3000", {
       query: { userId: "frontend-user" },
       reconnection: false,
@@ -103,18 +150,14 @@ export default function TodoListDetails() {
     socket.on(
       "bulk-progress",
       ({ progress, total }: { progress: number; total: number }) => {
-        setIsUpdating(true);
         setProgress(progress);
         setTotal(total);
-
+        fetchListDetails();
         if (progress >= total) {
-          fetchListDetails();
-          setTimeout(() => {
-            setIsUpdating(false);
-            setProgress(0);
-            setTotal(0);
-            setShouldConnect(false); // desconecta para evitar reconexiones
-          }, 1000);
+          setIsUpdating(false);
+          setProgress(0);
+          setTotal(0);
+          setShouldConnect(false);
         }
       }
     );
@@ -137,7 +180,12 @@ export default function TodoListDetails() {
         <TextField
           label="Nueva tarea"
           value={newItemContent}
-          onChange={(e) => setNewItemContent(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            setNewItemContent(e.target.value)
+          }
+          onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+            if (e.key === "Enter") handleAddItem();
+          }}
           fullWidth
         />
         <Button variant="contained" onClick={handleAddItem}>
@@ -146,54 +194,79 @@ export default function TodoListDetails() {
       </Box>
 
       <Stack spacing={2}>
-        {listDetails?.items?.map((item) => (
-          <Box
-            key={item.id}
-            display="flex"
-            alignItems="center"
-            justifyContent="space-between"
-            border="1px solid #ddd"
-            borderRadius={1}
-            px={2}
-            py={1}
-          >
-            <Box display="flex" alignItems="center" gap={1}>
-              <Checkbox
-                checked={item.done}
-                onChange={() => handleToggleDone(item.id)}
-              />
-              {editingItemId === item.id ? (
-                <TextField
-                  size="small"
-                  value={editedContent}
-                  onChange={(e) => setEditedContent(e.target.value)}
-                  onBlur={() => handleSaveEditedItem(item.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleSaveEditedItem(item.id);
-                  }}
-                  autoFocus
+        {listDetails?.items?.map((item) => {
+          const isModified = modifiedItems[item.id] !== undefined;
+          const newCompleted = modifiedItems[item.id];
+
+          return (
+            <Box
+              key={item.id}
+              display="flex"
+              alignItems="center"
+              justifyContent="space-between"
+              border="1px solid #ddd"
+              borderRadius={1}
+              px={2}
+              py={1}
+            >
+              <Box display="flex" alignItems="center" gap={1}>
+                <Checkbox
+                  checked={isModified ? newCompleted : item.completed}
+                  onChange={() => handleToggleDone(item.id)}
                 />
-              ) : (
-                <Typography
-                  variant="body1"
-                  sx={{ textDecoration: item.done ? "line-through" : "none" }}
-                  onClick={() => handleEditItem(item.id, item.content)}
+                {editingItemId === item.id ? (
+                  <TextField
+                    size="small"
+                    value={editedContent}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                      setEditedContent(e.target.value)
+                    }
+                    onBlur={() => handleSaveEditedItem(item.id)}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                      if (e.key === "Enter") handleSaveEditedItem(item.id);
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <Typography
+                    variant="body1"
+                    sx={{
+                      textDecoration: item.completed ? "line-through" : "none",
+                    }}
+                    onClick={() => handleEditItem(item.id, item.content)}
+                  >
+                    {item.content}
+                  </Typography>
+                )}
+              </Box>
+
+              <Box display="flex" alignItems="center" gap={1}>
+                {isModified && (
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => handleSaveCompletedChange(item.id)}
+                  >
+                    Guardar
+                  </Button>
+                )}
+                <IconButton
+                  onClick={() => handleDeleteItem(item.id)}
+                  color="error"
                 >
-                  {item.content}
-                </Typography>
-              )}
+                  <DeleteIcon />
+                </IconButton>
+              </Box>
             </Box>
-            <IconButton onClick={() => handleDeleteItem(item.id)} color="error">
-              <DeleteIcon />
-            </IconButton>
-          </Box>
-        ))}
+          );
+        })}
       </Stack>
       <Box
         display="flex"
         justifyContent="space-between"
         alignItems="center"
         mb={2}
+        mt={3}
       >
         <Button
           variant="contained"
